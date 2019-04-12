@@ -8,6 +8,7 @@
 
 #include <Object.mqh>
 #include <MQL_Easy\MQL_Easy.mqh>
+#include <Trade\Trade.mqh>
 //+------------------------------------------------------------------+
 
 MqlTick GetTick() {
@@ -16,11 +17,17 @@ MqlTick GetTick() {
    return tick;
 }
 
-int _MAGIC = 855500;
+MqlRates GetCurrentRate() {
+   MqlRates rates[];
+   CopyRates(Symbol(),0,0,1,rates);
+   return rates[0];
+}
+
+int _MAGIC = 855000;
 
 class PositionTrade : public CObject {
    private:
-      bool open, run, done;
+      bool open, run, done, loss;
       double openVolume, takeProfit, stopLoss;
       string symbol;
       ENUM_POSITION_TYPE position_type;
@@ -28,15 +35,17 @@ class PositionTrade : public CObject {
       CExecute execute;
       double startPrice;
       long ticket_sl, ticket_tp;
+      CTrade _trade;
       
    public:
       PositionTrade(string _symbol) {
-         open = run = done = false;
+         open = run = done = loss = false;
          symbol = _symbol;
          magicNumber = _MAGIC++;
          execute.SetSymbol(symbol);
          execute.SetMagicNumber(magicNumber);
          startPrice = 0.0;
+         _trade.SetExpertMagicNumber(magicNumber);
       }
       
       void Sell(double volume) {
@@ -46,6 +55,18 @@ class PositionTrade : public CObject {
       
       void Buy(double volume) {
          openVolume = volume;
+         position_type = POSITION_TYPE_BUY;
+      }
+      
+      void Sell(double volume, double price) {
+         openVolume = volume;
+         startPrice = price;
+         position_type = POSITION_TYPE_SELL;
+      }
+      
+      void Buy(double volume, double price) {
+         openVolume = volume;
+         startPrice = price;
          position_type = POSITION_TYPE_BUY;
       }
       
@@ -65,6 +86,10 @@ class PositionTrade : public CObject {
                execute.Position(TYPE_POSITION_BUY, openVolume);
             } else {
                // Limit
+               _trade.BuyLimit(openVolume,startPrice,symbol,0,0,ORDER_TIME_DAY,0);
+               if (_trade.ResultOrder() <= 0) {
+                  _trade.BuyStop(openVolume,startPrice,symbol,0,0,ORDER_TIME_DAY,0);
+               }
             }
          }
          else {
@@ -72,6 +97,11 @@ class PositionTrade : public CObject {
                execute.Position(TYPE_POSITION_SELL, openVolume);
             } else {
                // Limit
+               // Limit
+               _trade.SellLimit(openVolume,startPrice,symbol,0,0,ORDER_TIME_DAY,0);
+               if (_trade.ResultOrder() <= 0) {
+                  _trade.SellStop(openVolume,startPrice,symbol,0,0,ORDER_TIME_DAY,0);
+               }
             }
          }
       }
@@ -80,40 +110,52 @@ class PositionTrade : public CObject {
          return run;
       }
       
+      bool Loss() {
+         return loss;
+      }
+      
       void Update() {
          if (done) {
             // Encerrado
          } else {
             if (open) {
                // Abriu posicao! Acompanhar ordens
-               COrder orders(symbol,magicNumber);
-               int count = orders.GroupTotal();
-               long tck = orders.SelectByTicket(ticket_sl);
-               if (!tck) {
-                  orders[ticket_tp].Close();
-                  done = true;
+               
+               //COrder orders(symbol,magicNumber);
+               //int count = orders.GroupTotal();
+               if (!OrderSelect(ticket_sl)) {
+                  if (OrderSelect(ticket_tp)) {
+                     _trade.OrderDelete(ticket_tp);
+                  }
+                  done = loss = true;
                   open = run = false;
                }
-               tck = orders.SelectByTicket(ticket_tp);
-               if (!tck) {
-                  orders[ticket_sl].Close();
+               if (!OrderSelect(ticket_tp)) {
+                  if (OrderSelect(ticket_sl)) {
+                     _trade.OrderDelete(ticket_sl);
+                  }
                   done = true;
                   open = run = false;
                }
             } else if (run) {
                // Iniciou, capturando posicao
+               
                CPosition position(symbol,magicNumber);
                int total = position.GroupTotal();
-               long tck = position.SelectByIndex(0);
-               if (total > 0 && tck) {
+               if (total > 0) {
+                  long tck = position.SelectByIndex(0);
                   open = true;
                   startPrice = position.GetPriceOpen();
                   if (position_type == POSITION_TYPE_BUY) {
-                     ticket_sl = execute.Order(TYPE_ORDER_SELLLIMIT, openVolume, stopLoss);
-                     ticket_tp = execute.Order(TYPE_ORDER_SELLLIMIT, openVolume, takeProfit);
+                     _trade.SellStop(openVolume,startPrice-stopLoss,symbol,0,0,ORDER_TIME_DAY,0);
+                     ticket_sl = (long) _trade.ResultOrder();
+                     _trade.SellLimit(openVolume,startPrice+takeProfit,symbol,0,0,ORDER_TIME_DAY,0);
+                     ticket_tp = (long) _trade.ResultOrder();
                   } else {
-                     ticket_sl = execute.Order(TYPE_ORDER_BUYLIMIT, openVolume, stopLoss);
-                     ticket_tp = execute.Order(TYPE_ORDER_BUYLIMIT, openVolume, takeProfit);
+                     _trade.BuyStop(openVolume,startPrice+stopLoss,symbol,0,0,ORDER_TIME_DAY,0);
+                     ticket_sl = (long) _trade.ResultOrder();
+                     _trade.BuyLimit(openVolume,startPrice-takeProfit,symbol,0,0,ORDER_TIME_DAY,0);
+                     ticket_tp = (long) _trade.ResultOrder();
                   }
                }
             }
